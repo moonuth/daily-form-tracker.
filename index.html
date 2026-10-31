@@ -521,6 +521,7 @@
     let pendingCloudData = null;
     let cloudSaveQueue = Promise.resolve();
     const syncConfigKey = "daily-form-supabase-config";
+    const syncBaselinePrefix = "daily-form-sync-baseline:";
     const syncStatus = document.querySelector("#sync-status");
     let noticeTimer;
     let data = loadData();
@@ -611,6 +612,32 @@
           `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
       }
       return JSON.stringify(value);
+    }
+
+    function syncBaselineKey(userId) {
+      return `${syncBaselinePrefix}${userId}`;
+    }
+
+    function getSyncBaseline(userId) {
+      try {
+        const saved = localStorage.getItem(syncBaselineKey(userId));
+        if (!saved) return null;
+        const parsed = JSON.parse(saved);
+        return isRecord(parsed) ? parsed : null;
+      } catch (error) {
+        console.error("Could not read the last synced tracker data.", error);
+        showNotice("Could not read this device's sync history; please choose which data to keep.");
+        return null;
+      }
+    }
+
+    function setSyncBaseline(userId, value) {
+      try {
+        localStorage.setItem(syncBaselineKey(userId), JSON.stringify(value));
+      } catch (error) {
+        console.error("Could not save the last synced tracker data.", error);
+        showNotice("Your data synced, but this device could not save sync history.");
+      }
     }
 
     function updateSyncDialog() {
@@ -722,19 +749,35 @@
       setSyncStatus("Checking cloud data…");
       try {
         const cloudData = await fetchCloudData(user.id);
-        const localHasData = hasTrackerData(data);
-        if (cloudData && hasTrackerData(cloudData) && localHasData) {
-          pendingCloudData = cloudData;
-          document.querySelector("#sync-choice-description").textContent =
-            `This browser has saved data, and your cloud account also has data. Choose which copy to use for ${user.email}.`;
-          syncChoiceDialog.showModal();
-          return;
-        }
-        if (cloudData && hasTrackerData(cloudData)) {
-          data = cloudData;
-          localStorage.setItem(storageKey, JSON.stringify(data));
+        const localSnapshot = JSON.parse(JSON.stringify(data));
+        if (cloudData && stableStringify(cloudData) === stableStringify(localSnapshot)) {
+          setSyncBaseline(user.id, cloudData);
         } else {
-          await writeCloudData(user.id, data);
+          const baseline = getSyncBaseline(user.id);
+          const localMatchesBaseline = baseline && stableStringify(localSnapshot) === stableStringify(baseline);
+          const cloudMatchesBaseline = baseline && cloudData
+            && stableStringify(cloudData) === stableStringify(baseline);
+          if (cloudData && baseline && localMatchesBaseline) {
+            data = cloudData;
+            localStorage.setItem(storageKey, JSON.stringify(data));
+            setSyncBaseline(user.id, cloudData);
+          } else if (cloudData && baseline && cloudMatchesBaseline) {
+            await writeCloudData(user.id, localSnapshot);
+            setSyncBaseline(user.id, localSnapshot);
+          } else if (cloudData && hasTrackerData(cloudData) && hasTrackerData(localSnapshot)) {
+            pendingCloudData = cloudData;
+            document.querySelector("#sync-choice-description").textContent =
+              `This browser and your cloud account have different saved data for ${user.email}. Choose which copy to keep.`;
+            syncChoiceDialog.showModal();
+            return;
+          } else if (cloudData && hasTrackerData(cloudData)) {
+            data = cloudData;
+            localStorage.setItem(storageKey, JSON.stringify(data));
+            setSyncBaseline(user.id, cloudData);
+          } else {
+            await writeCloudData(user.id, localSnapshot);
+            setSyncBaseline(user.id, localSnapshot);
+          }
         }
         syncReady = true;
         setSyncStatus(`Synced · ${user.email}`);
@@ -764,6 +807,7 @@
             if (stableStringify(cloudData) === stableStringify(data)) return;
             data = cloudData;
             localStorage.setItem(storageKey, JSON.stringify(data));
+            setSyncBaseline(userId, cloudData);
             renderWeek();
             setSyncStatus(`Synced · ${syncUser.email}`);
             showNotice("Tracker data updated from your other device.");
@@ -788,7 +832,10 @@
         if (!syncReady || !syncUser || syncUser.id !== userId) return;
         setSyncStatus("Syncing…");
         await writeCloudData(userId, snapshot);
-        if (syncUser?.id === userId) setSyncStatus(`Synced · ${syncUser.email}`);
+        if (syncUser?.id === userId) {
+          setSyncBaseline(userId, snapshot);
+          setSyncStatus(`Synced · ${syncUser.email}`);
+        }
       }).catch((error) => {
         console.error("Could not sync tracker data to cloud.", error);
         setSyncStatus("Sync failed · saved on this device");
@@ -801,6 +848,7 @@
       data = pendingCloudData;
       pendingCloudData = null;
       localStorage.setItem(storageKey, JSON.stringify(data));
+      setSyncBaseline(syncUser.id, data);
       syncChoiceDialog.close();
       syncReady = true;
       setSyncStatus(`Synced · ${syncUser.email}`);
@@ -813,6 +861,7 @@
       if (!syncUser || !pendingCloudData) return;
       try {
         await writeCloudData(syncUser.id, data);
+        setSyncBaseline(syncUser.id, data);
         pendingCloudData = null;
         syncChoiceDialog.close();
         syncReady = true;
