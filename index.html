@@ -57,6 +57,7 @@
     .backup-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 22px 16px; }
     .backup-button { min-height: 36px; padding: 0 12px; border: 1px solid #dfe6e2; border-radius: 9px; background: #f8faf8; color: var(--green-dark); font-size: 12px; font-weight: 700; }
     .backup-button:hover { background: var(--green-soft); }
+    .sync-status { margin-right: auto; color: var(--muted); font-size: 12px; }
     .week-title { font-size: 19px; font-weight: 750; letter-spacing: -.45px; }
     .week-dates { margin-top: 5px; color: var(--muted); font-size: 13px; }
     .toolbar-actions { display: flex; align-items: center; gap: 10px; }
@@ -176,6 +177,7 @@
       .schedule-toolbar { align-items: flex-start; flex-direction: column; }
       .toolbar-actions { width: 100%; justify-content: space-between; }
       .backup-actions { padding-right: 12px; padding-left: 12px; }
+      .sync-status { flex-basis: 100%; }
       .date-picker { flex: 1; min-width: 0; }
       .schedule-scroll { padding-right: 12px; padding-left: 12px; }
       .week-grid { min-width: 1050px; }
@@ -253,6 +255,8 @@
           </div>
         </div>
         <div class="backup-actions" aria-label="Data backup">
+          <span class="sync-status" id="sync-status" role="status" aria-live="polite">Cloud sync not set up</span>
+          <button class="backup-button" id="open-sync" type="button">Set up cloud sync</button>
           <button class="backup-button" id="export-data" type="button">Download backup</button>
           <button class="backup-button" id="import-data" type="button">Restore backup</button>
           <input id="backup-file" type="file" accept=".json,application/json" hidden>
@@ -361,6 +365,61 @@
       </form>
     </div>
   </dialog>
+  <dialog id="sync-dialog" aria-labelledby="sync-dialog-title">
+    <div class="dialog-content">
+      <div class="dialog-heading">
+        <div>
+          <h2 id="sync-dialog-title">Set up cloud sync</h2>
+          <p>Connect your personal tracker to your Supabase project.</p>
+        </div>
+        <button class="close-dialog" id="close-sync-dialog" type="button" aria-label="Close">×</button>
+      </div>
+      <form class="food-form" id="sync-form">
+        <div class="field">
+          <label for="supabase-url">Project URL</label>
+          <input id="supabase-url" type="url" placeholder="https://your-project.supabase.co" autocomplete="url" required>
+        </div>
+        <div class="field">
+          <label for="supabase-key">Publishable key</label>
+          <input id="supabase-key" type="password" placeholder="sb_publishable_..." autocomplete="off" required>
+        </div>
+        <button class="primary" id="save-sync-config" type="button">Connect project</button>
+        <p class="dialog-help">Use only the Project URL and publishable key. Never enter a secret or service_role key here. These settings are saved in this browser; you will repeat this step on your phone.</p>
+        <div class="field">
+          <label for="sync-email">Email</label>
+          <input id="sync-email" type="email" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="sync-password">Password</label>
+          <input id="sync-password" type="password" autocomplete="current-password" minlength="8" required>
+        </div>
+        <div class="form-actions">
+          <button class="cancel-button" id="sign-out-sync" type="button">Sign out</button>
+          <button class="cancel-button" id="sign-up-sync" type="button">Create account</button>
+          <button class="primary" id="sign-in-sync" type="submit">Sign in</button>
+        </div>
+        <p class="dialog-help" id="sync-account-status" role="status" aria-live="polite"></p>
+      </form>
+    </div>
+  </dialog>
+  <dialog id="sync-choice-dialog" aria-labelledby="sync-choice-title">
+    <div class="dialog-content">
+      <div class="dialog-heading">
+        <div>
+          <h2 id="sync-choice-title">Choose which data to keep</h2>
+          <p id="sync-choice-description"></p>
+        </div>
+      </div>
+      <div class="food-form">
+        <p class="paste-review-note">Choose carefully. The selected data replaces the other copy. Your downloaded JSON backup remains a separate safety copy.</p>
+        <div class="form-actions">
+          <button class="cancel-button" id="defer-sync-choice" type="button">Not now</button>
+          <button class="cancel-button" id="use-cloud-data" type="button">Use cloud data here</button>
+          <button class="primary" id="upload-local-data" type="button">Keep this device's data</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <dialog id="body-weight-dialog" aria-labelledby="body-weight-dialog-title">
     <div class="dialog-content">
       <div class="dialog-heading">
@@ -419,6 +478,7 @@
   </dialog>
   <div class="notice hidden" id="notice" role="status" aria-live="polite"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     const foods = [
       { name: "Chicken breast (raw)", protein: 22.5, carbs: 0, fat: 2.6, calories: 120, fiber: 0 },
@@ -440,6 +500,8 @@
     const workoutDialog = document.querySelector("#workout-dialog");
     const editWorkoutDialog = document.querySelector("#edit-workout-dialog");
     const pasteWorkoutDialog = document.querySelector("#paste-workout-dialog");
+    const syncDialog = document.querySelector("#sync-dialog");
+    const syncChoiceDialog = document.querySelector("#sync-choice-dialog");
     const bodyWeightDialog = document.querySelector("#body-weight-dialog");
     const cardioDialog = document.querySelector("#cardio-dialog");
     const weekPicker = document.querySelector("#week-picker");
@@ -451,6 +513,15 @@
     let pendingPasteDate = "";
     let editingWorkout = null;
     let selectedWellnessDate = "";
+    let supabaseClient = null;
+    let syncUser = null;
+    let syncReady = false;
+    let initializingSyncUserId = null;
+    let syncChannel = null;
+    let pendingCloudData = null;
+    let cloudSaveQueue = Promise.resolve();
+    const syncConfigKey = "daily-form-supabase-config";
+    const syncStatus = document.querySelector("#sync-status");
     let noticeTimer;
     let data = loadData();
 
@@ -519,7 +590,240 @@
         showNotice("Could not save. Check your browser storage settings.");
         return false;
       }
+      if (syncReady && syncUser) queueCloudSave();
       return true;
+    }
+
+    function setSyncStatus(message) {
+      syncStatus.textContent = message;
+    }
+
+    function hasTrackerData(value) {
+      return Object.keys(value.meals).length > 0 || value.weights.length > 0
+        || value.workouts.length > 0 || value.bodyWeights.length > 0
+        || value.cardioSessions.length > 0;
+    }
+
+    function stableStringify(value) {
+      if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+      if (isRecord(value)) {
+        return `{${Object.keys(value).sort().map((key) =>
+          `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+      }
+      return JSON.stringify(value);
+    }
+
+    function updateSyncDialog() {
+      const savedConfig = getSavedSyncConfig();
+      document.querySelector("#open-sync").textContent = syncUser
+        ? "Cloud sync settings"
+        : savedConfig ? "Sign in to cloud sync" : "Set up cloud sync";
+      document.querySelector("#supabase-url").value = savedConfig?.url ?? "";
+      document.querySelector("#supabase-key").value = savedConfig?.key ?? "";
+      document.querySelector("#sync-account-status").textContent = syncUser
+        ? `Signed in as ${syncUser.email}. Sync status: ${syncStatus.textContent}.`
+        : "Connect your project, then sign in or create your account.";
+      document.querySelector("#sign-out-sync").disabled = !syncUser;
+    }
+
+    function getSavedSyncConfig() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(syncConfigKey) || "null");
+        return isRecord(saved) && typeof saved.url === "string" && typeof saved.key === "string"
+          ? saved : null;
+      } catch (error) {
+        console.error("Could not read cloud sync settings.", error);
+        showNotice("Could not read cloud sync settings from this browser.");
+        return null;
+      }
+    }
+
+    function validateSyncConfig(url, key) {
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(url);
+      } catch {
+        throw new Error("Enter a valid Supabase Project URL.");
+      }
+      if (parsedUrl.protocol !== "https:" || !parsedUrl.hostname.endsWith(".supabase.co")
+        || parsedUrl.pathname !== "/" || parsedUrl.search || parsedUrl.hash) {
+        throw new Error("Use the full HTTPS Supabase Project URL, such as https://your-project.supabase.co.");
+      }
+      if (!key || key.length < 20 || /secret|service_role/i.test(key)) {
+        throw new Error("Enter the publishable key, not a secret or service_role key.");
+      }
+      return { url: parsedUrl.origin, key };
+    }
+
+    async function connectSupabase(config) {
+      if (!window.supabase?.createClient) {
+        throw new Error("The Supabase client did not load. Check your internet connection and reload the app.");
+      }
+      if (syncChannel) {
+        await supabaseClient.removeChannel(syncChannel);
+        syncChannel = null;
+      }
+      syncUser = null;
+      syncReady = false;
+      supabaseClient = window.supabase.createClient(config.url, config.key);
+      const { data: sessionData, error } = await supabaseClient.auth.getSession();
+      if (error) throw error;
+      supabaseClient.auth.onAuthStateChange((event, session) => {
+        window.setTimeout(() => {
+          if (event === "SIGNED_OUT") {
+            if (syncChannel) supabaseClient.removeChannel(syncChannel);
+            syncChannel = null;
+            pendingCloudData = null;
+            syncUser = null;
+            syncReady = false;
+            setSyncStatus("Signed out · saved on this device");
+            updateSyncDialog();
+          } else if (session?.user) {
+            handleCloudSignIn(session.user).catch((syncError) => {
+              console.error("Could not initialize cloud sync.", syncError);
+              setSyncStatus("Sync needs attention");
+              showNotice(`Cloud sync could not start: ${syncError.message}`);
+            });
+          }
+        }, 0);
+      });
+      if (sessionData.session?.user) await handleCloudSignIn(sessionData.session.user);
+      else {
+        setSyncStatus("Project connected · sign in to sync");
+        updateSyncDialog();
+      }
+    }
+
+    async function fetchCloudData(userId) {
+      const { data: row, error } = await supabaseClient.from("tracker_data")
+        .select("data")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!row) return null;
+      return validateBackup({ app: "daily-form", schemaVersion: 1, data: row.data });
+    }
+
+    async function writeCloudData(userId, value) {
+      const { error } = await supabaseClient.from("tracker_data").upsert({
+        user_id: userId,
+        data: value,
+        updated_at: new Date().toISOString()
+      }, { onConflict: "user_id" });
+      if (error) throw error;
+    }
+
+    async function handleCloudSignIn(user) {
+      if (syncUser?.id === user.id && (syncReady || pendingCloudData)) return;
+      if (initializingSyncUserId === user.id) return;
+      initializingSyncUserId = user.id;
+      syncUser = user;
+      syncReady = false;
+      setSyncStatus("Checking cloud data…");
+      try {
+        const cloudData = await fetchCloudData(user.id);
+        const localHasData = hasTrackerData(data);
+        if (cloudData && hasTrackerData(cloudData) && localHasData) {
+          pendingCloudData = cloudData;
+          document.querySelector("#sync-choice-description").textContent =
+            `This browser has saved data, and your cloud account also has data. Choose which copy to use for ${user.email}.`;
+          syncChoiceDialog.showModal();
+          return;
+        }
+        if (cloudData && hasTrackerData(cloudData)) {
+          data = cloudData;
+          localStorage.setItem(storageKey, JSON.stringify(data));
+        } else {
+          await writeCloudData(user.id, data);
+        }
+        syncReady = true;
+        setSyncStatus(`Synced · ${user.email}`);
+        renderWeek();
+        subscribeToCloudChanges(user.id);
+        updateSyncDialog();
+      } finally {
+        initializingSyncUserId = null;
+      }
+    }
+
+    function subscribeToCloudChanges(userId) {
+      if (syncChannel) supabaseClient.removeChannel(syncChannel);
+      syncChannel = supabaseClient.channel(`tracker-data-${userId}`)
+        .on("postgres_changes", {
+          event: "UPDATE",
+          schema: "public",
+          table: "tracker_data",
+          filter: `user_id=eq.${userId}`
+        }, (payload) => {
+          try {
+            const cloudData = validateBackup({
+              app: "daily-form",
+              schemaVersion: 1,
+              data: payload.new.data
+            });
+            if (stableStringify(cloudData) === stableStringify(data)) return;
+            data = cloudData;
+            localStorage.setItem(storageKey, JSON.stringify(data));
+            renderWeek();
+            setSyncStatus(`Synced · ${syncUser.email}`);
+            showNotice("Tracker data updated from your other device.");
+          } catch (error) {
+            console.error("Could not apply tracker data from cloud.", error);
+            setSyncStatus("Cloud data needs attention");
+            showNotice(`Could not load cloud changes: ${error.message}`);
+          }
+        })
+        .subscribe((status) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.error("Cloud sync updates could not connect.", status);
+            setSyncStatus("Sync connected; live updates unavailable");
+          }
+        });
+    }
+
+    function queueCloudSave() {
+      const snapshot = JSON.parse(JSON.stringify(data));
+      const userId = syncUser.id;
+      cloudSaveQueue = cloudSaveQueue.then(async () => {
+        if (!syncReady || !syncUser || syncUser.id !== userId) return;
+        setSyncStatus("Syncing…");
+        await writeCloudData(userId, snapshot);
+        if (syncUser?.id === userId) setSyncStatus(`Synced · ${syncUser.email}`);
+      }).catch((error) => {
+        console.error("Could not sync tracker data to cloud.", error);
+        setSyncStatus("Sync failed · saved on this device");
+        showNotice(`Cloud sync failed: ${error.message}. Your change is saved on this device.`);
+      });
+    }
+
+    async function chooseCloudData() {
+      if (!syncUser || !pendingCloudData) return;
+      data = pendingCloudData;
+      pendingCloudData = null;
+      localStorage.setItem(storageKey, JSON.stringify(data));
+      syncChoiceDialog.close();
+      syncReady = true;
+      setSyncStatus(`Synced · ${syncUser.email}`);
+      renderWeek();
+      subscribeToCloudChanges(syncUser.id);
+      updateSyncDialog();
+    }
+
+    async function chooseLocalData() {
+      if (!syncUser || !pendingCloudData) return;
+      try {
+        await writeCloudData(syncUser.id, data);
+        pendingCloudData = null;
+        syncChoiceDialog.close();
+        syncReady = true;
+        setSyncStatus(`Synced · ${syncUser.email}`);
+        subscribeToCloudChanges(syncUser.id);
+        updateSyncDialog();
+        showNotice("This device's data is now saved to your cloud account.");
+      } catch (error) {
+        console.error("Could not upload this device's tracker data.", error);
+        showNotice(`Could not upload this device's data: ${error.message}`);
+      }
     }
 
     function showNotice(message) {
@@ -1409,6 +1713,120 @@
       const [file] = event.target.files;
       if (file) restoreBackup(file);
     });
+
+    document.querySelector("#open-sync").addEventListener("click", () => {
+      if (pendingCloudData) {
+        syncChoiceDialog.showModal();
+        return;
+      }
+      updateSyncDialog();
+      syncDialog.showModal();
+    });
+    document.querySelector("#close-sync-dialog").addEventListener("click", () => syncDialog.close());
+    syncDialog.addEventListener("click", (event) => {
+      if (event.target === syncDialog) syncDialog.close();
+    });
+    document.querySelector("#save-sync-config").addEventListener("click", async () => {
+      const url = document.querySelector("#supabase-url").value.trim();
+      const key = document.querySelector("#supabase-key").value.trim();
+      try {
+        const config = validateSyncConfig(url, key);
+        localStorage.setItem(syncConfigKey, JSON.stringify(config));
+        await connectSupabase(config);
+        showNotice("Supabase project connected on this device.");
+        updateSyncDialog();
+      } catch (error) {
+        console.error("Could not connect the Supabase project.", error);
+        showNotice(error.message || "Could not connect to Supabase.");
+      }
+    });
+    document.querySelector("#sync-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!supabaseClient) {
+        showNotice("Enter your Supabase Project URL and publishable key, then choose Connect project.");
+        return;
+      }
+      const email = document.querySelector("#sync-email").value.trim();
+      const password = document.querySelector("#sync-password").value;
+      try {
+        const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        document.querySelector("#sync-account-status").textContent = "Signed in. Checking cloud data…";
+      } catch (error) {
+        console.error("Could not sign in to cloud sync.", error);
+        showNotice(`Sign-in failed: ${error.message}`);
+      }
+    });
+    document.querySelector("#sign-up-sync").addEventListener("click", async () => {
+      if (!supabaseClient) {
+        showNotice("Enter your Supabase Project URL and publishable key, then choose Connect project.");
+        return;
+      }
+      if (window.location.protocol !== "https:" && window.location.protocol !== "http:") {
+        showNotice("Open the published GitHub Pages app before creating your sync account.");
+        return;
+      }
+      const email = document.querySelector("#sync-email").value.trim();
+      const password = document.querySelector("#sync-password").value;
+      if (!email || password.length < 8) {
+        showNotice("Enter your email and a password with at least 8 characters.");
+        return;
+      }
+      try {
+        const { data: result, error } = await supabaseClient.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: window.location.href.split("?")[0] }
+        });
+        if (error) throw error;
+        if (!result.session) {
+          document.querySelector("#sync-account-status").textContent =
+            "Check your email to confirm the account, then return here and sign in.";
+          showNotice("Confirmation email sent. Confirm your account, then sign in.");
+        }
+      } catch (error) {
+        console.error("Could not create a cloud sync account.", error);
+        showNotice(`Account creation failed: ${error.message}`);
+      }
+    });
+    document.querySelector("#sign-out-sync").addEventListener("click", async () => {
+      if (!supabaseClient || !syncUser) return;
+      try {
+        const { error } = await supabaseClient.auth.signOut();
+        if (error) throw error;
+        syncChoiceDialog.close();
+        pendingCloudData = null;
+        syncDialog.close();
+      } catch (error) {
+        console.error("Could not sign out of cloud sync.", error);
+        showNotice(`Sign-out failed: ${error.message}`);
+      }
+    });
+    document.querySelector("#defer-sync-choice").addEventListener("click", () => {
+      syncChoiceDialog.close();
+      setSyncStatus("Signed in · cloud sync not started");
+    });
+    document.querySelector("#use-cloud-data").addEventListener("click", () => {
+      chooseCloudData().catch((error) => {
+        console.error("Could not use cloud tracker data.", error);
+        showNotice(`Could not load cloud data: ${error.message}`);
+      });
+    });
+    document.querySelector("#upload-local-data").addEventListener("click", () => {
+      chooseLocalData().catch((error) => {
+        console.error("Could not upload this device's data.", error);
+        showNotice(`Could not upload this device's data: ${error.message}`);
+      });
+    });
+
+    const savedSyncConfig = getSavedSyncConfig();
+    if (savedSyncConfig) {
+      connectSupabase(savedSyncConfig).catch((error) => {
+        console.error("Could not restore cloud sync.", error);
+        setSyncStatus("Sync needs attention");
+        showNotice(`Cloud sync could not start: ${error.message}`);
+      });
+    }
 
     renderWeek();
   </script>
